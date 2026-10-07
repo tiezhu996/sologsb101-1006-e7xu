@@ -88,6 +88,10 @@ function adviceOf(crackId: string): Advice | null {
 }
 
 async function generateAdvice(row: CrackEnriched): Promise<void> {
+  if (row.blocked) {
+    ElMessage.warning(`${row.crack.code} 处于遮挡期（${row.blockReason || '暂不可见'}），保留最后可见速率与预警，暂不新增建议`)
+    return
+  }
   if (adviceOf(row.crack.id)) {
     ElMessage.info(`${row.crack.code} 已存在整治建议，可在「建议与备份」页维护`)
     return
@@ -276,11 +280,13 @@ function onOnlyWarningChange(value: string | number | boolean): void {
             <span :style="{ color: row.level === '严重' ? '#c0392b' : row.level === '较重' ? '#d68910' : '#1e8449' }">
               {{ row.rate.toFixed(3) }} mm/月
             </span>
+            <div v-if="row.blocked" class="muted" style="font-size: 11px">遮挡期沿用</div>
           </template>
         </el-table-column>
         <el-table-column label="分级" width="160">
           <template #default="{ row }">
             <LevelTag :level="row.level" :rate="row.surveyCount > 1 ? row.rate : undefined" size="small" />
+            <el-tag v-if="row.blocked" size="small" type="warning" effect="plain" style="margin-left: 6px">遮挡中</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="建议" width="120">
@@ -296,7 +302,14 @@ function onOnlyWarningChange(value: string | number | boolean): void {
             <el-button size="small" text type="primary" @click="openDrawer(row)">
               <el-icon><View /></el-icon> 曲线
             </el-button>
-            <el-button size="small" text type="primary" :icon="MagicStick" @click="generateAdvice(row)">
+            <el-button
+              size="small"
+              text
+              type="primary"
+              :icon="MagicStick"
+              :disabled="row.blocked"
+              @click="generateAdvice(row)"
+            >
               生成建议
             </el-button>
             <el-button
@@ -365,10 +378,23 @@ function onOnlyWarningChange(value: string | number | boolean): void {
           <el-descriptions-item label="台账状态">{{ drawerCrack.crack.state }}</el-descriptions-item>
           <el-descriptions-item label="累计变化">{{ drawerTrend.delta.value.toFixed(2) }} mm</el-descriptions-item>
           <el-descriptions-item label="月均速率">{{ drawerTrend.rate.value.toFixed(3) }} mm/月</el-descriptions-item>
+          <el-descriptions-item label="观测状态">
+            <span v-if="drawerTrend.blocked.value">遮挡中 · 沿用最后可见速率</span>
+            <span v-else>正常</span>
+          </el-descriptions-item>
         </el-descriptions>
+
+        <el-alert
+          v-if="drawerTrend.blocked.value"
+          type="warning"
+          :closable="false"
+          style="margin-top: 12px"
+          :title="`遮挡期（${drawerCrack.blockReason || '暂不可见'}）：保留最后一次可见速率与预警，不新增整治建议。`"
+        />
 
         <div style="margin: 14px 0">
           <LevelTag :level="drawerTrend.level.value" :rate="drawerTrend.rate.value" size="large" />
+          <el-tag v-if="drawerTrend.blocked.value" size="small" type="warning" style="margin-left: 10px">遮挡中</el-tag>
           <span v-if="drawerAdvice" class="muted" style="margin-left: 10px">
             建议：{{ drawerAdvice.measure }} · {{ drawerAdvice.state }}
           </span>
@@ -377,16 +403,29 @@ function onOnlyWarningChange(value: string | number | boolean): void {
 
         <h4 class="panel-subtitle">测次序列</h4>
         <el-table :data="drawerTrend.points.value" border stripe size="small">
-          <el-table-column prop="seq" label="测次" width="70" />
-          <el-table-column prop="date" label="日期" width="120" />
-          <el-table-column label="宽度(mm)" width="110">
+          <el-table-column prop="seq" label="测次" width="64" />
+          <el-table-column prop="date" label="日期" width="112" />
+          <el-table-column label="宽度(mm)" width="96">
             <template #default="{ row }">{{ row.widthMm.toFixed(2) }}</template>
           </el-table-column>
-          <el-table-column label="变化量(mm)" width="120">
-            <template #default="{ row }">{{ row.deltaWidthMm.toFixed(2) }}</template>
+          <el-table-column label="变化量(mm)" width="104">
+            <template #default="{ row }">
+              <span v-if="row.visibility === '暂不可见'" class="muted">—</span>
+              <span v-else>{{ row.deltaWidthMm.toFixed(2) }}</span>
+            </template>
           </el-table-column>
-          <el-table-column label="月均速率" width="120">
+          <el-table-column label="月均速率" width="104">
             <template #default="{ row }">{{ row.rate.toFixed(3) }}</template>
+          </el-table-column>
+          <el-table-column label="状态" min-width="120">
+            <template #default="{ row }">
+              <template v-if="row.visibility === '暂不可见'">
+                <el-tag size="small" type="warning">暂不可见</el-tag>
+                <div class="muted" style="font-size: 11px; line-height: 1.4">{{ row.blockReason }}</div>
+              </template>
+              <el-tag v-else-if="row.resumed" size="small" type="danger" plain>恢复</el-tag>
+              <span v-else class="muted">正常</span>
+            </template>
           </el-table-column>
         </el-table>
 

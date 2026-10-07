@@ -79,8 +79,8 @@ sologsb101-1006/
 
 - **IndexedDB 库名**：`gbtunnelcrack`（Dexie 封装，`src/utils/db.ts`）
 - **对象表**：`sections`、`rings`、`cracks`、`surveys`、`advices`
-- **数据结构版本**：`DB_VERSION = 2`，含 `version(1)` → `version(2)` 的 `stores()` 索引变更与 `upgrade()` 迁移逻辑（补齐行修订号 `revision`、用所属环片回填历史裂缝的 `sectionId` 冗余列、补齐缺失的变化量字段）
-- **首屏自动播种**：`initDatabase()` 中 `if (await db.sections.count() === 0) await seedDatabase()`，播种 2 个区间 → 5 个环片 → 6 条裂缝 → 14 个测次 → 4 条建议的互相引用演示数据；播种为幂等操作，重复调用不会重复插入
+- **数据结构版本**：`DB_VERSION = 3`，含 `version(1)` → `version(2)` → `version(3)` 的 `stores()` 索引变更与 `upgrade()` 迁移逻辑（v2：补齐行修订号 `revision`、用所属环片回填历史裂缝的 `sectionId` 冗余列、补齐缺失的变化量字段；v3：复测行补齐可见性标记 `visibility` 与遮挡原因 `blockReason`，历史测次一律迁移为「可见」）
+- **首屏自动播种**：`initDatabase()` 中 `if (await db.sections.count() === 0) await seedDatabase()`，播种 2 个区间 → 5 个环片 → 6 条裂缝 → 16 个测次（含 2 条遮挡演示：一条已恢复、一条仍处遮挡期）→ 4 条建议的互相引用演示数据；播种为幂等操作，重复调用不会重复插入
 - **localStorage 辅助键**：`gbtunnelcrack:db-version`（结构版本号）、`gbtunnelcrack:last-backup-at`（最近备份时间）、`gbtunnelcrack:ui-prefs`（上次选中区间、仅看预警开关）
 - 应用为**无状态容器**：数据不落容器磁盘、不使用数据库服务、不挂载命名卷；清理浏览器数据即清空业务数据（可在 `/backup` 页重新播种）
 
@@ -101,3 +101,12 @@ npm run preview    # 本地预览构建产物
 - 月均速率 `mm/月 = (本次宽度 − 上次宽度) ÷ 间隔天数 × 30`
 - 分级阈值：`< 0.10` 一般，`0.10 ~ 0.25` 较重，`≥ 0.25` 严重
 - 预警数 = 速率分级为「较重」及以上的裂缝数量
+
+## 八、遮挡（暂不可见）口径
+
+- 夜间检修防火板遮挡等情况可把测次登记为「暂不可见」并填写原因；该测次不产生读数，仅快照最后一次可见读数用于台账回显
+- 遮挡期保留最后一次可见速率与预警等级，不新增整治建议（已有建议保留）
+- 恢复时与**最后一次可见读数**比对计算变化量，按**实际间隔天数**（含遮挡期）换算速率——不把恢复读数当作重新首测，避免漏掉遮挡期累计的扩展量导致预警漏报
+- 曲线以底色块与虚线标出遮挡跳过区间，测次列表以「暂不可见 / 恢复」标签标注
+- 保存校验：恢复日期早于遮挡日期、跨裂缝转移测次、遮挡期间再补普通测次，均不能保存
+- 全量 JSON 备份/导入完整保留 `visibility` 与 `blockReason` 标记，旧版存档导入时自动补齐为「可见」

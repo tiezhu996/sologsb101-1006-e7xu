@@ -57,6 +57,7 @@ export function exportCrackCsv(
     '初测宽度(mm)',
     '初测长度(mm)',
     '状态',
+    '观测状态',
     '测次数',
     '最新宽度(mm)',
     '月均速率(mm/月)',
@@ -70,6 +71,8 @@ export function exportCrackCsv(
     const section = sections.find((item) => item.id === crack.sectionId)
     const points = buildSurveyPoints(surveys.filter((survey) => survey.crackId === crack.id))
     const advice = advices.find((item) => item.crackId === crack.id)
+    const latestPoint = points.length > 0 ? points[points.length - 1] : null
+    const blocked = latestPoint !== null && latestPoint.visibility === '暂不可见'
     lines.push(
       [
         section ? section.line : '—',
@@ -83,9 +86,10 @@ export function exportCrackCsv(
         crack.widthMm,
         crack.lengthMm,
         crack.state,
+        blocked ? `遮挡中（${latestPoint?.blockReason ?? ''}）` : '正常',
         points.length,
-        points.length > 0 ? points[points.length - 1].widthMm : crack.widthMm,
-        points.length > 0 ? points[points.length - 1].rate : 0,
+        latestPoint ? latestPoint.widthMm : crack.widthMm,
+        latestPoint ? latestPoint.rate : 0,
         advice ? advice.level : '未分级',
         advice ? advice.measure : '—',
         advice ? advice.state : '—'

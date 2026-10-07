@@ -4,16 +4,16 @@
  */
 import { computed, ref, shallowRef, toValue, watch, type ComputedRef, type MaybeRefOrGetter, type Ref } from 'vue'
 import { liveQuery } from 'dexie'
-import type { Survey, SurveyPoint } from '@/types/survey'
+import type { BlockSpan, Survey, SurveyPoint } from '@/types/survey'
 import type { AdviceLevel } from '@/types/advice'
 import { db } from '@/utils/db'
-import { buildSurveyPoints, latestRate, levelFromRate, totalDelta } from '@/utils/rate'
+import { buildBlockSpans, buildSurveyPoints, latestRate, levelFromRate, totalDelta } from '@/utils/rate'
 
 export interface UseCrackTrendResult {
   surveys: Ref<Survey[]>
   points: ComputedRef<SurveyPoint[]>
   latest: ComputedRef<SurveyPoint | null>
-  /** 最新测次的月均速率（mm/月） */
+  /** 最新测次的月均速率（mm/月），遮挡期为沿用的最后一次可见速率 */
   rate: ComputedRef<number>
   /** 累计宽度变化量（mm） */
   delta: ComputedRef<number>
@@ -21,6 +21,10 @@ export interface UseCrackTrendResult {
   level: ComputedRef<AdviceLevel>
   /** 是否已发展（速率超过预警阈值） */
   warning: ComputedRef<boolean>
+  /** 当前是否处于遮挡期（最新测次为暂不可见） */
+  blocked: ComputedRef<boolean>
+  /** 遮挡跳过区间（供曲线与列表标注） */
+  spans: ComputedRef<BlockSpan[]>
   loading: Ref<boolean>
   error: Ref<string | null>
   reload: () => Promise<void>
@@ -83,6 +87,8 @@ export function useCrackTrend(crackId: MaybeRefOrGetter<string | null | undefine
   const delta = computed(() => totalDelta(points.value))
   const level = computed(() => levelFromRate(rate.value))
   const warning = computed(() => level.value !== '一般')
+  const blocked = computed(() => latest.value !== null && latest.value.visibility === '暂不可见')
+  const spans = computed(() => buildBlockSpans(points.value))
 
   return {
     surveys,
@@ -92,6 +98,8 @@ export function useCrackTrend(crackId: MaybeRefOrGetter<string | null | undefine
     delta,
     level,
     warning,
+    blocked,
+    spans,
     loading,
     error,
     reload: load

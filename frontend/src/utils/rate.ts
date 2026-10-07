@@ -1,9 +1,12 @@
 /**
  * 裂缝发展速率计算与分级
- * 速率口径：相邻两次复测的宽度变化量 ÷ 间隔天数 × 30，单位 mm/月
+ * 速率口径：相邻两次可见复测的宽度变化量 ÷ 间隔天数 × 30，单位 mm/月
+ * 遮挡口径：暂不可见测次不产生读数，遮挡期沿用最后一次可见速率；
+ * 恢复测次与最后一次可见测次比对，按实际间隔天数（含遮挡期）换算速率，
+ * 避免把恢复读数当作重新首测而漏掉遮挡期累计的扩展量。
  */
 import type { AdviceLevel } from '@/types/advice'
-import type { Survey, SurveyPoint } from '@/types/survey'
+import type { BlockSpan, Survey, SurveyPoint } from '@/types/survey'
 
 /** 预警阈值：月均速率 ≥ 0.10 mm/月 记预警（较重及以上） */
 export const RATE_WARNING = 0.1
@@ -72,33 +75,86 @@ export const LEVEL_WEIGHT: Record<AdviceLevel, number> = {
   严重: 30
 }
 
-/** 把某条裂缝的全部测次整理成折线取点（按测次升序） */
+/**
+ * 把某条裂缝的全部测次整理成折线取点（按测次升序）
+ * - 暂不可见测次：无读数，取点宽度快照最后一次可见读数，速率沿用最后一次可见速率
+ * - 恢复测次（遮挡后首个普通测次）：与最后一次可见测次比对，按实际间隔天数换算速率
+ */
 export function buildSurveyPoints(surveys: Survey[]): SurveyPoint[] {
   const sorted = [...surveys].sort((a, b) => a.seq - b.seq)
   const points: SurveyPoint[] = []
-  sorted.forEach((survey, index) => {
-    const previous = index === 0 ? null : sorted[index - 1]
-    const rawDelta = previous ? survey.widthMm - previous.widthMm : 0
-    const days = previous ? daysBetween(previous.date, survey.date) : 1
+  let lastVisible: Survey | null = null
+  let lastVisibleRate = 0
+  let pendingBlock: Survey | null = null
+  sorted.forEach((survey) => {
+    if (survey.visibility === '暂不可见') {
+      points.push({
+        seq: survey.seq,
+        date: survey.date,
+        widthMm: lastVisible ? lastVisible.widthMm : survey.widthMm,
+        lengthMm: lastVisible ? lastVisible.lengthMm : survey.lengthMm,
+        deltaWidthMm: 0,
+        rate: lastVisibleRate,
+        visibility: '暂不可见',
+        blockReason: survey.blockReason,
+        resumed: false,
+        skippedFromSeq: null
+      })
+      pendingBlock = survey
+      return
+    }
+    const rawDelta = lastVisible ? survey.widthMm - lastVisible.widthMm : 0
+    const days = lastVisible ? daysBetween(lastVisible.date, survey.date) : 1
+    const rate = lastVisible ? monthlyRate(rawDelta, days) : 0
     points.push({
       seq: survey.seq,
       date: survey.date,
       widthMm: survey.widthMm,
       lengthMm: survey.lengthMm,
-      deltaWidthMm: round(previous ? rawDelta : survey.deltaWidthMm, 2),
-      rate: previous ? monthlyRate(rawDelta, days) : 0
+      deltaWidthMm: round(lastVisible ? rawDelta : survey.deltaWidthMm, 2),
+      rate,
+      visibility: '可见',
+      blockReason: '',
+      resumed: pendingBlock !== null,
+      skippedFromSeq: pendingBlock ? pendingBlock.seq : null
     })
+    lastVisible = survey
+    lastVisibleRate = rate
+    pendingBlock = null
   })
   return points
 }
 
-/** 最新测次的月均速率 */
+/** 从取点序列提取遮挡跳过区间（供曲线与列表标注） */
+export function buildBlockSpans(points: SurveyPoint[]): BlockSpan[] {
+  const spans: BlockSpan[] = []
+  let open: BlockSpan | null = null
+  points.forEach((point) => {
+    if (point.visibility === '暂不可见') {
+      open = {
+        fromSeq: point.seq,
+        fromDate: point.date,
+        toSeq: null,
+        toDate: null,
+        reason: point.blockReason
+      }
+      spans.push(open)
+    } else if (open && point.resumed) {
+      open.toSeq = point.seq
+      open.toDate = point.date
+      open = null
+    }
+  })
+  return spans
+}
+
+/** 最新测次的月均速率（遮挡期为沿用的最后一次可见速率） */
 export function latestRate(points: SurveyPoint[]): number {
   if (points.length === 0) return 0
   return points[points.length - 1].rate
 }
 
-/** 累计宽度变化量（末测次 - 首测次） */
+/** 累计宽度变化量（末测次 - 首测次），恢复测次含遮挡期累计的扩展量 */
 export function totalDelta(points: SurveyPoint[]): number {
   if (points.length < 2) return 0
   return round(points[points.length - 1].widthMm - points[0].widthMm, 2)

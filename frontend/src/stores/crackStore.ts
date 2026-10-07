@@ -26,6 +26,9 @@ export interface CrackEnriched {
   rate: number
   level: AdviceLevel
   surveyCount: number
+  /** 当前是否处于遮挡期（最新测次为暂不可见），遮挡期保留最后可见速率与预警、不新增建议 */
+  blocked: boolean
+  blockReason: string
 }
 
 export const useCrackStore = defineStore('crack', () => {
@@ -55,7 +58,9 @@ export const useCrackStore = defineStore('crack', () => {
         sectionLabel: section ? `${section.line} ${formatMileage(ring ? ring.mileage : section.startMileage)}` : '区间已删除',
         rate: summary ? summary.rate : 0,
         level: (summary ? summary.level : '一般') as AdviceLevel,
-        surveyCount: summary ? summary.count : 0
+        surveyCount: summary ? summary.count : 0,
+        blocked: summary ? summary.blocked : false,
+        blockReason: summary ? summary.blockReason : ''
       }
     })
   )

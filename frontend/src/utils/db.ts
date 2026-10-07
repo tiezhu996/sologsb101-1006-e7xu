@@ -15,7 +15,7 @@ import type { Advice } from '@/types/advice'
 export const DB_NAME = 'gbtunnelcrack'
 
 /** 当前数据结构版本号：调整表结构必须递增并补 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** localStorage 侧少量元数据键名 */
 export const LS_KEYS = {
@@ -52,7 +52,7 @@ export interface Revisioned {
   revision?: number
 }
 
-export const ROW_REVISION = 2
+export const ROW_REVISION = 3
 
 export type SectionRow = Section & Revisioned
 export type RingRow = Ring & Revisioned
@@ -126,6 +126,28 @@ class TunnelCrackDatabase extends Dexie {
             }
           })
       })
+
+    // v3：复测补充可见性标记（visibility）与遮挡原因（blockReason），支持遮挡期跳过测次
+    this
+      .version(3)
+      .stores({
+        sections: 'id, line, structureType, startMileage, updatedAt',
+        rings: 'id, sectionId, ringNo, mileage, segmentType, updatedAt',
+        cracks: 'id, ringId, sectionId, code, position, direction, state, updatedAt',
+        surveys: 'id, crackId, seq, date, surveyor, visibility, updatedAt',
+        advices: 'id, crackId, level, measure, state, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        // 迁移：历史测次一律视为可见，遮挡原因为空；行修订号同步到 v3
+        await tx
+          .table('surveys')
+          .toCollection()
+          .modify((survey: Record<string, unknown>) => {
+            if (survey.visibility !== '暂不可见') survey.visibility = '可见'
+            if (typeof survey.blockReason !== 'string') survey.blockReason = ''
+            survey.revision = ROW_REVISION
+          })
+      })
   }
 }
 
@@ -180,34 +202,37 @@ const SEED_RINGS: RingRow[] = [
 
 const SEED_CRACKS: CrackRow[] = [
   { id: 'crack-1', ringId: 'ring-1', sectionId: 'sec-1', code: 'SL-118-01', position: '拱顶', direction: '纵向', widthMm: 0.42, lengthMm: 620, state: '待整治', createdAt: stamp(-110), updatedAt: stamp(-3), revision: ROW_REVISION },
-  { id: 'crack-2', ringId: 'ring-1', sectionId: 'sec-1', code: 'SL-118-02', position: '侧墙', direction: '环向', widthMm: 0.18, lengthMm: 410, state: '观察', createdAt: stamp(-110), updatedAt: stamp(-8), revision: ROW_REVISION },
+  { id: 'crack-2', ringId: 'ring-1', sectionId: 'sec-1', code: 'SL-118-02', position: '侧墙', direction: '环向', widthMm: 0.34, lengthMm: 470, state: '观察', createdAt: stamp(-110), updatedAt: stamp(50), revision: ROW_REVISION },
   { id: 'crack-3', ringId: 'ring-2', sectionId: 'sec-1', code: 'SL-132-01', position: '道床', direction: '斜向', widthMm: 0.55, lengthMm: 880, state: '待整治', createdAt: stamp(-104), updatedAt: stamp(-3), revision: ROW_REVISION },
-  { id: 'crack-4', ringId: 'ring-3', sectionId: 'sec-1', code: 'SL-145-01', position: '拱顶', direction: '环向', widthMm: 0.24, lengthMm: 350, state: '观察', createdAt: stamp(-99), updatedAt: stamp(-9), revision: ROW_REVISION },
+  { id: 'crack-4', ringId: 'ring-3', sectionId: 'sec-1', code: 'SL-145-01', position: '拱顶', direction: '环向', widthMm: 0.3, lengthMm: 366, state: '观察', createdAt: stamp(-99), updatedAt: stamp(-5), revision: ROW_REVISION },
   { id: 'crack-5', ringId: 'ring-4', sectionId: 'sec-2', code: 'NL-027-01', position: '侧墙', direction: '纵向', widthMm: 0.38, lengthMm: 540, state: '已整治', createdAt: stamp(-88), updatedAt: stamp(-20), revision: ROW_REVISION },
   { id: 'crack-6', ringId: 'ring-5', sectionId: 'sec-2', code: 'NL-041-01', position: '拱顶', direction: '斜向', widthMm: 0.12, lengthMm: 260, state: '观察', createdAt: stamp(-60), updatedAt: stamp(-6), revision: ROW_REVISION }
 ]
 
 const SEED_SURVEYS: SurveyRow[] = [
   // crack-1：0.42 → 0.71 → 1.02，末次月均 0.31 mm/月（严重）
-  { id: 'sv-1-1', crackId: 'crack-1', seq: 1, date: '2024-04-08', widthMm: 0.42, lengthMm: 620, deltaWidthMm: 0, surveyor: '周维', createdAt: stamp(-73), updatedAt: stamp(-73), revision: ROW_REVISION },
-  { id: 'sv-1-2', crackId: 'crack-1', seq: 2, date: '2024-05-08', widthMm: 0.71, lengthMm: 690, deltaWidthMm: 0.29, surveyor: '周维', createdAt: stamp(-43), updatedAt: stamp(-43), revision: ROW_REVISION },
-  { id: 'sv-1-3', crackId: 'crack-1', seq: 3, date: '2024-06-07', widthMm: 1.02, lengthMm: 745, deltaWidthMm: 0.31, surveyor: '李文博', createdAt: stamp(-13), updatedAt: stamp(-13), revision: ROW_REVISION },
-  // crack-2：0.18 → 0.21 → 0.25，末次月均 0.04 mm/月（一般）
-  { id: 'sv-2-1', crackId: 'crack-2', seq: 1, date: '2024-04-10', widthMm: 0.18, lengthMm: 410, deltaWidthMm: 0, surveyor: '李文博', createdAt: stamp(-71), updatedAt: stamp(-71), revision: ROW_REVISION },
-  { id: 'sv-2-2', crackId: 'crack-2', seq: 2, date: '2024-05-10', widthMm: 0.21, lengthMm: 430, deltaWidthMm: 0.03, surveyor: '李文博', createdAt: stamp(-41), updatedAt: stamp(-41), revision: ROW_REVISION },
-  { id: 'sv-2-3', crackId: 'crack-2', seq: 3, date: '2024-06-09', widthMm: 0.25, lengthMm: 452, deltaWidthMm: 0.04, surveyor: '李文博', createdAt: stamp(-11), updatedAt: stamp(-11), revision: ROW_REVISION },
+  { id: 'sv-1-1', crackId: 'crack-1', seq: 1, date: '2024-04-08', widthMm: 0.42, lengthMm: 620, deltaWidthMm: 0, surveyor: '周维', visibility: '可见', blockReason: '', createdAt: stamp(-73), updatedAt: stamp(-73), revision: ROW_REVISION },
+  { id: 'sv-1-2', crackId: 'crack-1', seq: 2, date: '2024-05-08', widthMm: 0.71, lengthMm: 690, deltaWidthMm: 0.29, surveyor: '周维', visibility: '可见', blockReason: '', createdAt: stamp(-43), updatedAt: stamp(-43), revision: ROW_REVISION },
+  { id: 'sv-1-3', crackId: 'crack-1', seq: 3, date: '2024-06-07', widthMm: 1.02, lengthMm: 745, deltaWidthMm: 0.31, surveyor: '李文博', visibility: '可见', blockReason: '', createdAt: stamp(-13), updatedAt: stamp(-13), revision: ROW_REVISION },
+  // crack-2：0.18 → 0.21 → 0.25，第 4 测次遮挡跳过，恢复测次与最后可见读数比对（0.34 − 0.25，间隔 61 天，月均 0.044）
+  { id: 'sv-2-1', crackId: 'crack-2', seq: 1, date: '2024-04-10', widthMm: 0.18, lengthMm: 410, deltaWidthMm: 0, surveyor: '李文博', visibility: '可见', blockReason: '', createdAt: stamp(-71), updatedAt: stamp(-71), revision: ROW_REVISION },
+  { id: 'sv-2-2', crackId: 'crack-2', seq: 2, date: '2024-05-10', widthMm: 0.21, lengthMm: 430, deltaWidthMm: 0.03, surveyor: '李文博', visibility: '可见', blockReason: '', createdAt: stamp(-41), updatedAt: stamp(-41), revision: ROW_REVISION },
+  { id: 'sv-2-3', crackId: 'crack-2', seq: 3, date: '2024-06-09', widthMm: 0.25, lengthMm: 452, deltaWidthMm: 0.04, surveyor: '李文博', visibility: '可见', blockReason: '', createdAt: stamp(-11), updatedAt: stamp(-11), revision: ROW_REVISION },
+  { id: 'sv-2-4', crackId: 'crack-2', seq: 4, date: '2024-07-09', widthMm: 0.25, lengthMm: 452, deltaWidthMm: 0, surveyor: '李文博', visibility: '暂不可见', blockReason: '夜间检修防火板遮挡', createdAt: stamp(19), updatedAt: stamp(19), revision: ROW_REVISION },
+  { id: 'sv-2-5', crackId: 'crack-2', seq: 5, date: '2024-08-09', widthMm: 0.34, lengthMm: 470, deltaWidthMm: 0.09, surveyor: '周维', visibility: '可见', blockReason: '', createdAt: stamp(50), updatedAt: stamp(50), revision: ROW_REVISION },
   // crack-3：0.55 → 0.72 → 0.98，末次月均 0.26 mm/月（较重）
-  { id: 'sv-3-1', crackId: 'crack-3', seq: 1, date: '2024-04-12', widthMm: 0.55, lengthMm: 880, deltaWidthMm: 0, surveyor: '陈立', createdAt: stamp(-69), updatedAt: stamp(-69), revision: ROW_REVISION },
-  { id: 'sv-3-2', crackId: 'crack-3', seq: 2, date: '2024-05-12', widthMm: 0.72, lengthMm: 905, deltaWidthMm: 0.17, surveyor: '陈立', createdAt: stamp(-39), updatedAt: stamp(-39), revision: ROW_REVISION },
-  { id: 'sv-3-3', crackId: 'crack-3', seq: 3, date: '2024-06-11', widthMm: 0.98, lengthMm: 962, deltaWidthMm: 0.26, surveyor: '陈立', createdAt: stamp(-9), updatedAt: stamp(-9), revision: ROW_REVISION },
-  // crack-4：0.24 → 0.30，末次月均 0.06 mm/月（一般）
-  { id: 'sv-4-1', crackId: 'crack-4', seq: 1, date: '2024-04-15', widthMm: 0.24, lengthMm: 350, deltaWidthMm: 0, surveyor: '周维', createdAt: stamp(-66), updatedAt: stamp(-66), revision: ROW_REVISION },
-  { id: 'sv-4-2', crackId: 'crack-4', seq: 2, date: '2024-05-15', widthMm: 0.3, lengthMm: 366, deltaWidthMm: 0.06, surveyor: '周维', createdAt: stamp(-36), updatedAt: stamp(-36), revision: ROW_REVISION },
+  { id: 'sv-3-1', crackId: 'crack-3', seq: 1, date: '2024-04-12', widthMm: 0.55, lengthMm: 880, deltaWidthMm: 0, surveyor: '陈立', visibility: '可见', blockReason: '', createdAt: stamp(-69), updatedAt: stamp(-69), revision: ROW_REVISION },
+  { id: 'sv-3-2', crackId: 'crack-3', seq: 2, date: '2024-05-12', widthMm: 0.72, lengthMm: 905, deltaWidthMm: 0.17, surveyor: '陈立', visibility: '可见', blockReason: '', createdAt: stamp(-39), updatedAt: stamp(-39), revision: ROW_REVISION },
+  { id: 'sv-3-3', crackId: 'crack-3', seq: 3, date: '2024-06-11', widthMm: 0.98, lengthMm: 962, deltaWidthMm: 0.26, surveyor: '陈立', visibility: '可见', blockReason: '', createdAt: stamp(-9), updatedAt: stamp(-9), revision: ROW_REVISION },
+  // crack-4：0.24 → 0.30 后被防火板遮挡，遮挡期沿用最后可见速率 0.06 mm/月（一般），不新增建议
+  { id: 'sv-4-1', crackId: 'crack-4', seq: 1, date: '2024-04-15', widthMm: 0.24, lengthMm: 350, deltaWidthMm: 0, surveyor: '周维', visibility: '可见', blockReason: '', createdAt: stamp(-66), updatedAt: stamp(-66), revision: ROW_REVISION },
+  { id: 'sv-4-2', crackId: 'crack-4', seq: 2, date: '2024-05-15', widthMm: 0.3, lengthMm: 366, deltaWidthMm: 0.06, surveyor: '周维', visibility: '可见', blockReason: '', createdAt: stamp(-36), updatedAt: stamp(-36), revision: ROW_REVISION },
+  { id: 'sv-4-3', crackId: 'crack-4', seq: 3, date: '2024-06-15', widthMm: 0.3, lengthMm: 366, deltaWidthMm: 0, surveyor: '周维', visibility: '暂不可见', blockReason: '夜间检修防火板遮挡', createdAt: stamp(-5), updatedAt: stamp(-5), revision: ROW_REVISION },
   // crack-5（已整治）：0.38 → 0.46 后停止复测
-  { id: 'sv-5-1', crackId: 'crack-5', seq: 1, date: '2024-02-20', widthMm: 0.38, lengthMm: 540, deltaWidthMm: 0, surveyor: '陈立', createdAt: stamp(-121), updatedAt: stamp(-121), revision: ROW_REVISION },
-  { id: 'sv-5-2', crackId: 'crack-5', seq: 2, date: '2024-03-21', widthMm: 0.46, lengthMm: 548, deltaWidthMm: 0.08, surveyor: '陈立', createdAt: stamp(-91), updatedAt: stamp(-91), revision: ROW_REVISION },
+  { id: 'sv-5-1', crackId: 'crack-5', seq: 1, date: '2024-02-20', widthMm: 0.38, lengthMm: 540, deltaWidthMm: 0, surveyor: '陈立', visibility: '可见', blockReason: '', createdAt: stamp(-121), updatedAt: stamp(-121), revision: ROW_REVISION },
+  { id: 'sv-5-2', crackId: 'crack-5', seq: 2, date: '2024-03-21', widthMm: 0.46, lengthMm: 548, deltaWidthMm: 0.08, surveyor: '陈立', visibility: '可见', blockReason: '', createdAt: stamp(-91), updatedAt: stamp(-91), revision: ROW_REVISION },
   // crack-6：仅初测一次
-  { id: 'sv-6-1', crackId: 'crack-6', seq: 1, date: '2024-05-06', widthMm: 0.12, lengthMm: 260, deltaWidthMm: 0, surveyor: '李文博', createdAt: stamp(-45), updatedAt: stamp(-45), revision: ROW_REVISION }
+  { id: 'sv-6-1', crackId: 'crack-6', seq: 1, date: '2024-05-06', widthMm: 0.12, lengthMm: 260, deltaWidthMm: 0, surveyor: '李文博', visibility: '可见', blockReason: '', createdAt: stamp(-45), updatedAt: stamp(-45), revision: ROW_REVISION }
 ]
 
 const SEED_ADVICES: AdviceRow[] = [
@@ -316,7 +341,7 @@ export async function exportSnapshot(): Promise<BackupPayload> {
   }
 }
 
-/** 用快照覆盖整库 */
+/** 用快照覆盖整库（旧存档缺少的可见性标记在此补齐，遮挡标记随存档保留） */
 export async function importSnapshot(payload: BackupPayload): Promise<void> {
   await db.transaction('rw', db.sections, db.rings, db.cracks, db.surveys, db.advices, async () => {
     await Promise.all([
@@ -327,10 +352,17 @@ export async function importSnapshot(payload: BackupPayload): Promise<void> {
       db.advices.clear()
     ])
     const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION })
+    // 旧版存档缺少可见性标记：兜底为「可见」，已有遮挡标记原样保留
+    const revSurvey = (row: Survey): SurveyRow => ({
+      ...row,
+      visibility: row.visibility === '暂不可见' ? '暂不可见' : '可见',
+      blockReason: typeof row.blockReason === 'string' ? row.blockReason : '',
+      revision: ROW_REVISION
+    })
     await db.sections.bulkPut((payload.sections ?? []).map(rev))
     await db.rings.bulkPut((payload.rings ?? []).map(rev))
     await db.cracks.bulkPut((payload.cracks ?? []).map(rev))
-    await db.surveys.bulkPut((payload.surveys ?? []).map(rev))
+    await db.surveys.bulkPut((payload.surveys ?? []).map(revSurvey))
     await db.advices.bulkPut((payload.advices ?? []).map(rev))
   })
 }
