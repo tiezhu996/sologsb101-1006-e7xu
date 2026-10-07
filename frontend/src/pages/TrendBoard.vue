@@ -88,6 +88,13 @@ function adviceOf(crackId: string): Advice | null {
 }
 
 async function generateAdvice(row: CrackEnriched): Promise<void> {
+  const summary = surveyStore.summaryOf(row.crack.id)
+  if (summary?.occluded) {
+    ElMessage.warning(
+      `${row.crack.code} 自 ${summary.occludedSince} 起暂不可见（${summary.occludeReason || '遮挡'}），遮挡期保留最后一次可见速率与预警，不新增整治建议`
+    )
+    return
+  }
   if (adviceOf(row.crack.id)) {
     ElMessage.info(`${row.crack.code} 已存在整治建议，可在「建议与备份」页维护`)
     return
@@ -179,8 +186,22 @@ const drawerAdvice = computed(() =>
   drawerCrackId.value ? adviceOf(drawerCrackId.value) : null
 )
 
+/** 抽屉测次序列：遮挡行与可见行合并展示，可见行附带速率取点 */
+const drawerRows = computed(() => {
+  const pointBySeq = new Map(drawerTrend.points.value.map((point) => [point.seq, point]))
+  return drawerTrend.surveys.value.map((survey) => ({
+    ...survey,
+    point: pointBySeq.get(survey.seq) ?? null
+  }))
+})
+
 function crackRowKey(row: CrackEnriched): string {
   return row.crack.id
+}
+
+/** 抽屉测次行样式：遮挡行置灰 */
+function drawerRowClass({ row }: { row: { kind?: string } }): string {
+  return row.kind === 'occluded' ? 'is-occluded-row' : ''
 }
 
 function sortByRate(a: CrackEnriched, b: CrackEnriched): number {
@@ -281,6 +302,15 @@ function onOnlyWarningChange(value: string | number | boolean): void {
         <el-table-column label="分级" width="160">
           <template #default="{ row }">
             <LevelTag :level="row.level" :rate="row.surveyCount > 1 ? row.rate : undefined" size="small" />
+            <el-tag
+              v-if="surveyStore.summaryOf(row.crack.id)?.occluded"
+              size="small"
+              type="warning"
+              effect="dark"
+              style="margin-left: 6px"
+            >
+              遮挡中
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="建议" width="120">
@@ -369,24 +399,50 @@ function onOnlyWarningChange(value: string | number | boolean): void {
 
         <div style="margin: 14px 0">
           <LevelTag :level="drawerTrend.level.value" :rate="drawerTrend.rate.value" size="large" />
+          <el-tag v-if="drawerTrend.occluded.value" type="warning" effect="dark" style="margin-left: 10px">遮挡中</el-tag>
           <span v-if="drawerAdvice" class="muted" style="margin-left: 10px">
             建议：{{ drawerAdvice.measure }} · {{ drawerAdvice.state }}
           </span>
           <span v-else class="muted" style="margin-left: 10px">尚未生成整治建议</span>
         </div>
 
+        <el-alert
+          v-if="drawerTrend.openOcclusion.value"
+          type="warning"
+          :closable="false"
+          style="margin-bottom: 12px"
+          :title="`第 ${drawerTrend.openOcclusion.value.occlusion.seq} 测次起暂不可见（${drawerTrend.openOcclusion.value.occlusion.date}，${drawerTrend.openOcclusion.value.occlusion.occludeReason ?? '遮挡'}）。遮挡期保留最后一次可见速率与预警，不新增整治建议。`"
+        />
+
         <h4 class="panel-subtitle">测次序列</h4>
-        <el-table :data="drawerTrend.points.value" border stripe size="small">
-          <el-table-column prop="seq" label="测次" width="70" />
-          <el-table-column prop="date" label="日期" width="120" />
-          <el-table-column label="宽度(mm)" width="110">
-            <template #default="{ row }">{{ row.widthMm.toFixed(2) }}</template>
+        <el-table :data="drawerRows" border stripe size="small" :row-class-name="drawerRowClass">
+          <el-table-column prop="seq" label="测次" width="64" />
+          <el-table-column label="日期" width="128">
+            <template #default="{ row }">
+              {{ row.date }}
+              <el-tag v-if="row.recoversOcclusionId" size="small" type="success" effect="plain">恢复</el-tag>
+            </template>
           </el-table-column>
-          <el-table-column label="变化量(mm)" width="120">
-            <template #default="{ row }">{{ row.deltaWidthMm.toFixed(2) }}</template>
+          <el-table-column label="类型" width="110">
+            <template #default="{ row }">
+              <el-tag v-if="row.kind === 'occluded'" size="small" type="warning">暂不可见</el-tag>
+              <span v-else class="muted">普通读数</span>
+            </template>
           </el-table-column>
-          <el-table-column label="月均速率" width="120">
-            <template #default="{ row }">{{ row.rate.toFixed(3) }}</template>
+          <el-table-column label="宽度(mm)" width="100">
+            <template #default="{ row }">{{ row.kind === 'occluded' ? '—' : row.widthMm.toFixed(2) }}</template>
+          </el-table-column>
+          <el-table-column label="变化量(mm)" width="110">
+            <template #default="{ row }">
+              <span v-if="row.kind === 'occluded'" class="muted">—</span>
+              <span v-else>{{ row.deltaWidthMm.toFixed(2) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="月均速率" width="110">
+            <template #default="{ row }">
+              <span v-if="row.kind === 'occluded'" class="muted">跳过</span>
+              <span v-else>{{ (row.point?.rate ?? 0).toFixed(3) }}</span>
+            </template>
           </el-table-column>
         </el-table>
 
@@ -420,5 +476,10 @@ function onOnlyWarningChange(value: string | number | boolean): void {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+:deep(.is-occluded-row) {
+  background-color: #fdf6ec;
+  color: #8c99ab;
 }
 </style>

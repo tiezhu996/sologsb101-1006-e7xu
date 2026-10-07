@@ -1,9 +1,11 @@
 /**
  * 裂缝发展速率计算与分级
- * 速率口径：相邻两次复测的宽度变化量 ÷ 间隔天数 × 30，单位 mm/月
+ * 速率口径：相邻两次可见复测的宽度变化量 ÷ 间隔天数 × 30，单位 mm/月
+ * 遮挡（暂不可见）测次不参与取点：恢复测次与最后一次可见读数比对，
+ * 按实际间隔天数（含遮挡期）折算速率，避免遮挡期累计扩展量被漏计。
  */
 import type { AdviceLevel } from '@/types/advice'
-import type { Survey, SurveyPoint } from '@/types/survey'
+import type { OcclusionInterval, Survey, SurveyPoint } from '@/types/survey'
 
 /** 预警阈值：月均速率 ≥ 0.10 mm/月 记预警（较重及以上） */
 export const RATE_WARNING = 0.1
@@ -72,21 +74,66 @@ export const LEVEL_WEIGHT: Record<AdviceLevel, number> = {
   严重: 30
 }
 
-/** 把某条裂缝的全部测次整理成折线取点（按测次升序） */
+/** 判断测次是否为遮挡登记（历史数据缺 kind 字段时按普通读数处理） */
+export function isOccluded(survey: Survey): boolean {
+  return survey.kind === 'occluded'
+}
+
+/**
+ * 把某条裂缝的测次按顺序配对成遮挡区间：
+ * 每条遮挡登记与其后第一条普通测次（恢复测次）配对；recovery 为 null 表示仍处遮挡期。
+ */
+export function occlusionIntervals(surveys: Survey[]): OcclusionInterval[] {
+  const sorted = [...surveys].sort((a, b) => a.seq - b.seq)
+  const intervals: OcclusionInterval[] = []
+  let open: Survey | null = null
+  sorted.forEach((row) => {
+    if (isOccluded(row)) {
+      if (open) intervals.push({ occlusion: open, recovery: null })
+      open = row
+    } else if (open) {
+      intervals.push({ occlusion: open, recovery: row })
+      open = null
+    }
+  })
+  if (open) intervals.push({ occlusion: open, recovery: null })
+  return intervals
+}
+
+/** 当前是否处于遮挡期（末次测次为未恢复的遮挡登记） */
+export function openOcclusionOf(surveys: Survey[]): OcclusionInterval | null {
+  const intervals = occlusionIntervals(surveys)
+  return intervals.find((interval) => interval.recovery === null) ?? null
+}
+
+/**
+ * 把某条裂缝的全部测次整理成折线取点（按测次升序）。
+ * 遮挡行跳过不取点；恢复测次与最后一次可见读数比对，按实际间隔天数折算速率。
+ */
 export function buildSurveyPoints(surveys: Survey[]): SurveyPoint[] {
   const sorted = [...surveys].sort((a, b) => a.seq - b.seq)
+  const visible = sorted.filter((survey) => !isOccluded(survey))
   const points: SurveyPoint[] = []
-  sorted.forEach((survey, index) => {
-    const previous = index === 0 ? null : sorted[index - 1]
+  visible.forEach((survey, index) => {
+    const previous = index === 0 ? null : visible[index - 1]
     const rawDelta = previous ? survey.widthMm - previous.widthMm : 0
     const days = previous ? daysBetween(previous.date, survey.date) : 1
+    let skipped = 0
+    if (previous) {
+      const from = sorted.indexOf(previous)
+      const to = sorted.indexOf(survey)
+      skipped = sorted.slice(from + 1, to).filter((row) => isOccluded(row)).length
+    }
     points.push({
       seq: survey.seq,
       date: survey.date,
       widthMm: survey.widthMm,
       lengthMm: survey.lengthMm,
       deltaWidthMm: round(previous ? rawDelta : survey.deltaWidthMm, 2),
-      rate: previous ? monthlyRate(rawDelta, days) : 0
+      rate: previous ? monthlyRate(rawDelta, days) : 0,
+      resumed: typeof survey.recoversOcclusionId === 'string' && survey.recoversOcclusionId.length > 0,
+      skippedBefore: skipped,
+      spanDays: previous ? days : 0
     })
   })
   return points

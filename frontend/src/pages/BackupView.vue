@@ -156,6 +156,15 @@ async function submit(): Promise<void> {
   if (!instance) return
   const valid = await instance.validate().catch(() => false)
   if (!valid) return
+  if (!editingId) {
+    const summary = surveyStore.summaryOf(form.crackId)
+    if (summary?.occluded) {
+      ElMessage.warning(
+        `该裂缝自 ${summary.occludedSince} 起暂不可见（${summary.occludeReason || '遮挡'}），遮挡期不新增整治建议`
+      )
+      return
+    }
+  }
   if (editingId) {
     await adviceTable.update(editingId, { ...form })
     ElMessage.success('整治建议已更新')
@@ -293,7 +302,7 @@ function adviceRowKey(row: AdviceRow): string {
       <div>
         <h2 class="page-head__title">整治建议与数据备份</h2>
         <p class="page-head__desc">
-          维护建议措施与状态流转（待下发 → 已下发 → 已完成），并导出/导入 IndexedDB 全量 JSON 存档。
+          维护建议措施与状态流转（待下发 → 已下发 → 已完成），并导出/导入 IndexedDB 全量 JSON 存档（含「暂不可见」遮挡标记与恢复关联）。
         </p>
       </div>
       <div class="page-head__actions">

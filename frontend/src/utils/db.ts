@@ -15,7 +15,7 @@ import type { Advice } from '@/types/advice'
 export const DB_NAME = 'gbtunnelcrack'
 
 /** 当前数据结构版本号：调整表结构必须递增并补 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** localStorage 侧少量元数据键名 */
 export const LS_KEYS = {
@@ -52,7 +52,7 @@ export interface Revisioned {
   revision?: number
 }
 
-export const ROW_REVISION = 2
+export const ROW_REVISION = 3
 
 export type SectionRow = Section & Revisioned
 export type RingRow = Ring & Revisioned
@@ -80,7 +80,7 @@ class TunnelCrackDatabase extends Dexie {
     })
 
     // v2：裂缝补充 sectionId 冗余列（按区间筛选/统计免联表）；复测补充 surveyor 索引；建议补充 note 字段
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         sections: 'id, line, structureType, startMileage, updatedAt',
         rings: 'id, sectionId, ringNo, mileage, segmentType, updatedAt',
@@ -124,6 +124,37 @@ class TunnelCrackDatabase extends Dexie {
             if (typeof survey.deltaWidthMm !== 'number' || !Number.isFinite(survey.deltaWidthMm)) {
               survey.deltaWidthMm = 0
             }
+          })
+      })
+
+    // v3：复测支持「暂不可见」遮挡登记（kind / occludeReason / recoversOcclusionId），历史测次补齐为普通读数
+    this.version(DB_VERSION)
+      .stores({
+        sections: 'id, line, structureType, startMileage, updatedAt',
+        rings: 'id, sectionId, ringNo, mileage, segmentType, updatedAt',
+        cracks: 'id, ringId, sectionId, code, position, direction, state, updatedAt',
+        surveys: 'id, crackId, seq, date, surveyor, updatedAt',
+        advices: 'id, crackId, level, measure, state, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        const tables: Array<Table<Record<string, unknown>, string>> = [
+          tx.table('sections'),
+          tx.table('rings'),
+          tx.table('cracks'),
+          tx.table('surveys'),
+          tx.table('advices')
+        ]
+        for (const table of tables) {
+          await table.toCollection().modify((row: Record<string, unknown>) => {
+            row.revision = ROW_REVISION
+          })
+        }
+        // 历史测次一律视为普通读数；遮挡标记字段保持缺省，不参与速率取点
+        await tx
+          .table('surveys')
+          .toCollection()
+          .modify((survey: Record<string, unknown>) => {
+            if (survey.kind !== 'occluded') survey.kind = 'normal'
           })
       })
   }
@@ -189,25 +220,27 @@ const SEED_CRACKS: CrackRow[] = [
 
 const SEED_SURVEYS: SurveyRow[] = [
   // crack-1：0.42 → 0.71 → 1.02，末次月均 0.31 mm/月（严重）
-  { id: 'sv-1-1', crackId: 'crack-1', seq: 1, date: '2024-04-08', widthMm: 0.42, lengthMm: 620, deltaWidthMm: 0, surveyor: '周维', createdAt: stamp(-73), updatedAt: stamp(-73), revision: ROW_REVISION },
-  { id: 'sv-1-2', crackId: 'crack-1', seq: 2, date: '2024-05-08', widthMm: 0.71, lengthMm: 690, deltaWidthMm: 0.29, surveyor: '周维', createdAt: stamp(-43), updatedAt: stamp(-43), revision: ROW_REVISION },
-  { id: 'sv-1-3', crackId: 'crack-1', seq: 3, date: '2024-06-07', widthMm: 1.02, lengthMm: 745, deltaWidthMm: 0.31, surveyor: '李文博', createdAt: stamp(-13), updatedAt: stamp(-13), revision: ROW_REVISION },
-  // crack-2：0.18 → 0.21 → 0.25，末次月均 0.04 mm/月（一般）
-  { id: 'sv-2-1', crackId: 'crack-2', seq: 1, date: '2024-04-10', widthMm: 0.18, lengthMm: 410, deltaWidthMm: 0, surveyor: '李文博', createdAt: stamp(-71), updatedAt: stamp(-71), revision: ROW_REVISION },
-  { id: 'sv-2-2', crackId: 'crack-2', seq: 2, date: '2024-05-10', widthMm: 0.21, lengthMm: 430, deltaWidthMm: 0.03, surveyor: '李文博', createdAt: stamp(-41), updatedAt: stamp(-41), revision: ROW_REVISION },
-  { id: 'sv-2-3', crackId: 'crack-2', seq: 3, date: '2024-06-09', widthMm: 0.25, lengthMm: 452, deltaWidthMm: 0.04, surveyor: '李文博', createdAt: stamp(-11), updatedAt: stamp(-11), revision: ROW_REVISION },
+  { id: 'sv-1-1', crackId: 'crack-1', seq: 1, date: '2024-04-08', widthMm: 0.42, lengthMm: 620, deltaWidthMm: 0, surveyor: '周维', kind: 'normal', createdAt: stamp(-73), updatedAt: stamp(-73), revision: ROW_REVISION },
+  { id: 'sv-1-2', crackId: 'crack-1', seq: 2, date: '2024-05-08', widthMm: 0.71, lengthMm: 690, deltaWidthMm: 0.29, surveyor: '周维', kind: 'normal', createdAt: stamp(-43), updatedAt: stamp(-43), revision: ROW_REVISION },
+  { id: 'sv-1-3', crackId: 'crack-1', seq: 3, date: '2024-06-07', widthMm: 1.02, lengthMm: 745, deltaWidthMm: 0.31, surveyor: '李文博', kind: 'normal', createdAt: stamp(-13), updatedAt: stamp(-13), revision: ROW_REVISION },
+  // crack-2：0.18 → 0.21 → 0.25，之后防火板遮挡一期；恢复读数 0.55 与最后可见读数比对，跨遮挡期 61 天折算 0.148 mm/月（较重）
+  { id: 'sv-2-1', crackId: 'crack-2', seq: 1, date: '2024-04-10', widthMm: 0.18, lengthMm: 410, deltaWidthMm: 0, surveyor: '李文博', kind: 'normal', createdAt: stamp(-71), updatedAt: stamp(-71), revision: ROW_REVISION },
+  { id: 'sv-2-2', crackId: 'crack-2', seq: 2, date: '2024-05-10', widthMm: 0.21, lengthMm: 430, deltaWidthMm: 0.03, surveyor: '李文博', kind: 'normal', createdAt: stamp(-41), updatedAt: stamp(-41), revision: ROW_REVISION },
+  { id: 'sv-2-3', crackId: 'crack-2', seq: 3, date: '2024-06-09', widthMm: 0.25, lengthMm: 452, deltaWidthMm: 0.04, surveyor: '李文博', kind: 'normal', createdAt: stamp(-11), updatedAt: stamp(-11), revision: ROW_REVISION },
+  { id: 'sv-2-4', crackId: 'crack-2', seq: 4, date: '2024-07-10', widthMm: 0, lengthMm: 0, deltaWidthMm: 0, surveyor: '李文博', kind: 'occluded', occludeReason: '夜间检修后防火板遮挡', createdAt: stamp(20), updatedAt: stamp(20), revision: ROW_REVISION },
+  { id: 'sv-2-5', crackId: 'crack-2', seq: 5, date: '2024-08-09', widthMm: 0.55, lengthMm: 470, deltaWidthMm: 0.3, surveyor: '李文博', kind: 'normal', recoversOcclusionId: 'sv-2-4', createdAt: stamp(50), updatedAt: stamp(50), revision: ROW_REVISION },
   // crack-3：0.55 → 0.72 → 0.98，末次月均 0.26 mm/月（较重）
-  { id: 'sv-3-1', crackId: 'crack-3', seq: 1, date: '2024-04-12', widthMm: 0.55, lengthMm: 880, deltaWidthMm: 0, surveyor: '陈立', createdAt: stamp(-69), updatedAt: stamp(-69), revision: ROW_REVISION },
-  { id: 'sv-3-2', crackId: 'crack-3', seq: 2, date: '2024-05-12', widthMm: 0.72, lengthMm: 905, deltaWidthMm: 0.17, surveyor: '陈立', createdAt: stamp(-39), updatedAt: stamp(-39), revision: ROW_REVISION },
-  { id: 'sv-3-3', crackId: 'crack-3', seq: 3, date: '2024-06-11', widthMm: 0.98, lengthMm: 962, deltaWidthMm: 0.26, surveyor: '陈立', createdAt: stamp(-9), updatedAt: stamp(-9), revision: ROW_REVISION },
+  { id: 'sv-3-1', crackId: 'crack-3', seq: 1, date: '2024-04-12', widthMm: 0.55, lengthMm: 880, deltaWidthMm: 0, surveyor: '陈立', kind: 'normal', createdAt: stamp(-69), updatedAt: stamp(-69), revision: ROW_REVISION },
+  { id: 'sv-3-2', crackId: 'crack-3', seq: 2, date: '2024-05-12', widthMm: 0.72, lengthMm: 905, deltaWidthMm: 0.17, surveyor: '陈立', kind: 'normal', createdAt: stamp(-39), updatedAt: stamp(-39), revision: ROW_REVISION },
+  { id: 'sv-3-3', crackId: 'crack-3', seq: 3, date: '2024-06-11', widthMm: 0.98, lengthMm: 962, deltaWidthMm: 0.26, surveyor: '陈立', kind: 'normal', createdAt: stamp(-9), updatedAt: stamp(-9), revision: ROW_REVISION },
   // crack-4：0.24 → 0.30，末次月均 0.06 mm/月（一般）
-  { id: 'sv-4-1', crackId: 'crack-4', seq: 1, date: '2024-04-15', widthMm: 0.24, lengthMm: 350, deltaWidthMm: 0, surveyor: '周维', createdAt: stamp(-66), updatedAt: stamp(-66), revision: ROW_REVISION },
-  { id: 'sv-4-2', crackId: 'crack-4', seq: 2, date: '2024-05-15', widthMm: 0.3, lengthMm: 366, deltaWidthMm: 0.06, surveyor: '周维', createdAt: stamp(-36), updatedAt: stamp(-36), revision: ROW_REVISION },
+  { id: 'sv-4-1', crackId: 'crack-4', seq: 1, date: '2024-04-15', widthMm: 0.24, lengthMm: 350, deltaWidthMm: 0, surveyor: '周维', kind: 'normal', createdAt: stamp(-66), updatedAt: stamp(-66), revision: ROW_REVISION },
+  { id: 'sv-4-2', crackId: 'crack-4', seq: 2, date: '2024-05-15', widthMm: 0.3, lengthMm: 366, deltaWidthMm: 0.06, surveyor: '周维', kind: 'normal', createdAt: stamp(-36), updatedAt: stamp(-36), revision: ROW_REVISION },
   // crack-5（已整治）：0.38 → 0.46 后停止复测
-  { id: 'sv-5-1', crackId: 'crack-5', seq: 1, date: '2024-02-20', widthMm: 0.38, lengthMm: 540, deltaWidthMm: 0, surveyor: '陈立', createdAt: stamp(-121), updatedAt: stamp(-121), revision: ROW_REVISION },
-  { id: 'sv-5-2', crackId: 'crack-5', seq: 2, date: '2024-03-21', widthMm: 0.46, lengthMm: 548, deltaWidthMm: 0.08, surveyor: '陈立', createdAt: stamp(-91), updatedAt: stamp(-91), revision: ROW_REVISION },
+  { id: 'sv-5-1', crackId: 'crack-5', seq: 1, date: '2024-02-20', widthMm: 0.38, lengthMm: 540, deltaWidthMm: 0, surveyor: '陈立', kind: 'normal', createdAt: stamp(-121), updatedAt: stamp(-121), revision: ROW_REVISION },
+  { id: 'sv-5-2', crackId: 'crack-5', seq: 2, date: '2024-03-21', widthMm: 0.46, lengthMm: 548, deltaWidthMm: 0.08, surveyor: '陈立', kind: 'normal', createdAt: stamp(-91), updatedAt: stamp(-91), revision: ROW_REVISION },
   // crack-6：仅初测一次
-  { id: 'sv-6-1', crackId: 'crack-6', seq: 1, date: '2024-05-06', widthMm: 0.12, lengthMm: 260, deltaWidthMm: 0, surveyor: '李文博', createdAt: stamp(-45), updatedAt: stamp(-45), revision: ROW_REVISION }
+  { id: 'sv-6-1', crackId: 'crack-6', seq: 1, date: '2024-05-06', widthMm: 0.12, lengthMm: 260, deltaWidthMm: 0, surveyor: '李文博', kind: 'normal', createdAt: stamp(-45), updatedAt: stamp(-45), revision: ROW_REVISION }
 ]
 
 const SEED_ADVICES: AdviceRow[] = [
@@ -316,7 +349,7 @@ export async function exportSnapshot(): Promise<BackupPayload> {
   }
 }
 
-/** 用快照覆盖整库 */
+/** 用快照覆盖整库（旧存档缺失的遮挡标记字段在此补齐默认值） */
 export async function importSnapshot(payload: BackupPayload): Promise<void> {
   await db.transaction('rw', db.sections, db.rings, db.cracks, db.surveys, db.advices, async () => {
     await Promise.all([
@@ -327,10 +360,14 @@ export async function importSnapshot(payload: BackupPayload): Promise<void> {
       db.advices.clear()
     ])
     const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION })
+    const normalizeSurvey = (row: Survey): Survey => ({
+      ...row,
+      kind: row.kind === 'occluded' ? 'occluded' : 'normal'
+    })
     await db.sections.bulkPut((payload.sections ?? []).map(rev))
     await db.rings.bulkPut((payload.rings ?? []).map(rev))
     await db.cracks.bulkPut((payload.cracks ?? []).map(rev))
-    await db.surveys.bulkPut((payload.surveys ?? []).map(rev))
+    await db.surveys.bulkPut((payload.surveys ?? []).map((row) => rev(normalizeSurvey(row))))
     await db.advices.bulkPut((payload.advices ?? []).map(rev))
   })
 }

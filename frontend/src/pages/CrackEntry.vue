@@ -322,6 +322,15 @@ function latestDateOf(crackId: string): string {
         <el-table-column label="发展等级" width="170">
           <template #default="{ row }">
             <LevelTag :level="row.level" :rate="row.surveyCount > 1 ? row.rate : undefined" size="small" />
+            <el-tag
+              v-if="surveyStore.summaryOf(row.crack.id)?.occluded"
+              size="small"
+              type="warning"
+              effect="dark"
+              style="margin-left: 6px"
+            >
+              遮挡中
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="100">

@@ -8,7 +8,7 @@ import type { Crack, CrackState } from '@/types/crack'
 import type { Survey } from '@/types/survey'
 import type { Advice } from '@/types/advice'
 import { formatMileage } from '@/types/section'
-import { buildSurveyPoints } from '@/utils/rate'
+import { buildSurveyPoints, occlusionIntervals, openOcclusionOf } from '@/utils/rate'
 
 /** 触发浏览器下载 */
 export function download(filename: string, content: string, mime: string): void {
@@ -60,6 +60,7 @@ export function exportCrackCsv(
     '测次数',
     '最新宽度(mm)',
     '月均速率(mm/月)',
+    '遮挡状态',
     '建议等级',
     '建议措施',
     '建议状态'
@@ -68,8 +69,16 @@ export function exportCrackCsv(
   cracks.forEach((crack) => {
     const ring = rings.find((item) => item.id === crack.ringId)
     const section = sections.find((item) => item.id === crack.sectionId)
-    const points = buildSurveyPoints(surveys.filter((survey) => survey.crackId === crack.id))
+    const crackSurveys = surveys.filter((survey) => survey.crackId === crack.id)
+    const points = buildSurveyPoints(crackSurveys)
     const advice = advices.find((item) => item.crackId === crack.id)
+    const open = openOcclusionOf(crackSurveys)
+    const everOccluded = occlusionIntervals(crackSurveys).length > 0
+    const occlusionText = open
+      ? `遮挡中（${open.occlusion.occludeReason ?? '暂不可见'}，自 ${open.occlusion.date}）`
+      : everOccluded
+        ? '曾遮挡，已恢复'
+        : '—'
     lines.push(
       [
         section ? section.line : '—',
@@ -86,6 +95,7 @@ export function exportCrackCsv(
         points.length,
         points.length > 0 ? points[points.length - 1].widthMm : crack.widthMm,
         points.length > 0 ? points[points.length - 1].rate : 0,
+        occlusionText,
         advice ? advice.level : '未分级',
         advice ? advice.measure : '—',
         advice ? advice.state : '—'

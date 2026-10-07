@@ -2,6 +2,8 @@
 /**
  * /surveys 复测测次与变化量对比
  * 按测次追加读数，自动与前一次比对生成变化量，并用折线对比历次宽度。
+ * 支持「暂不可见」遮挡登记：遮挡期在曲线与列表中标出跳过区间，
+ * 恢复测次与最后可见读数比对、按实际间隔天数折算速率。
  * 消费 Survey、Crack；复用 <FilterBar>、<EmptyPanel>、<LevelTag>。
  */
 import { computed, reactive, ref } from 'vue'
@@ -20,7 +22,7 @@ import {
   type SurveyDraft
 } from '@/types/survey'
 import type { CrackDirection, CrackPosition } from '@/types/crack'
-import { round } from '@/utils/rate'
+import { isOccluded, round } from '@/utils/rate'
 
 type FilterModel = { keyword: string; [key: string]: string | string[] | boolean }
 
@@ -33,6 +35,9 @@ const activeCrack = computed<CrackEnriched | null>(
   () => crackStore.enriched.find((item) => item.crack.id === activeCrackId.value) ?? null
 )
 const trend = useCrackTrend(activeCrackId)
+
+/** 当前裂缝是否处于遮挡期（用于表单提示与按钮文案） */
+const openOcclusion = computed(() => trend.openOcclusion.value)
 
 /* ------------------------------ 筛选 ------------------------------ */
 
@@ -60,6 +65,10 @@ function onFilterChange(model: FilterModel): void {
 
 const candidateCracks = computed(() => crackStore.filtered)
 
+function summaryOf(crackId: string) {
+  return surveyStore.summaryOf(crackId)
+}
+
 /* ------------------------------ 折线图 ------------------------------ */
 
 const chart = computed(() => {
@@ -81,6 +90,21 @@ const chart = computed(() => {
     x: padLeft + stepX * index,
     y: padTop + (height - padTop - padBottom) * (1 - (point.widthMm - min) / span)
   }))
+  /** 相邻取点线段：跨遮挡区间的线段单独标出（虚线 + 阴影带） */
+  const segments = coords.slice(1).map((to, index) => {
+    const from = coords[index]
+    return { from, to, skipped: to.skippedBefore > 0 }
+  })
+  const gaps = segments
+    .filter((segment) => segment.skipped)
+    .map((segment) => ({
+      x1: segment.from.x,
+      x2: segment.to.x,
+      y1: segment.from.y,
+      y2: segment.to.y,
+      midX: (segment.from.x + segment.to.x) / 2,
+      days: segment.to.spanDays
+    }))
   return {
     width,
     height,
@@ -90,7 +114,8 @@ const chart = computed(() => {
     min,
     max,
     coords,
-    polyline: coords.map((item) => `${item.x.toFixed(1)},${item.y.toFixed(1)}`).join(' '),
+    segments,
+    gaps,
     baseline: height - padBottom,
     top: padTop
   }
@@ -105,9 +130,14 @@ const form = reactive<SurveyDraft>({ ...EMPTY_SURVEY_DRAFT })
 const rules: FormRules = {
   date: [{ required: true, message: '请选择复测日期', trigger: 'change' }],
   widthMm: [{ required: true, message: '请填写复测宽度', trigger: 'blur' }],
-  surveyor: [{ required: true, message: '请填写复测人', trigger: 'blur' }]
+  surveyor: [{ required: true, message: '请填写复测人', trigger: 'blur' }],
+  occludeReason: [{ required: true, message: '请填写遮挡原因', trigger: 'blur' }]
 }
 let editingId: string | null = null
+/** 编辑中的测次类型（类型不可修改，仅新建时可选择） */
+const editingKind = ref<'normal' | 'occluded'>('normal')
+
+const isOccludedForm = computed(() => form.kind === 'occluded')
 
 function openCreate(): void {
   if (!activeCrackId.value) {
@@ -115,6 +145,7 @@ function openCreate(): void {
     return
   }
   editingId = null
+  editingKind.value = 'normal'
   dialogTitle.value = `追加测次 · ${activeCrack.value?.crack.code ?? ''}`
   const previous = trend.latest.value
   Object.assign(form, {
@@ -122,7 +153,9 @@ function openCreate(): void {
     date: new Date().toISOString().slice(0, 10),
     widthMm: previous ? round(previous.widthMm, 2) : activeCrack.value?.crack.widthMm ?? 0,
     lengthMm: previous ? previous.lengthMm : activeCrack.value?.crack.lengthMm ?? 0,
-    surveyor: previous ? '' : '周维'
+    surveyor: previous ? '' : '周维',
+    kind: 'normal',
+    occludeReason: ''
   })
   dialogVisible.value = true
 }
@@ -131,13 +164,16 @@ function openEdit(surveyId: string): void {
   const survey = trend.surveys.value.find((item) => item.id === surveyId)
   if (!survey) return
   editingId = surveyId
-  dialogTitle.value = `编辑测次 · 第 ${survey.seq} 测次`
+  editingKind.value = isOccluded(survey) ? 'occluded' : 'normal'
+  dialogTitle.value = `编辑测次 · 第 ${survey.seq} 测次${editingKind.value === 'occluded' ? '（暂不可见）' : ''}`
   Object.assign(form, {
     crackId: survey.crackId,
     date: survey.date,
     widthMm: survey.widthMm,
     lengthMm: survey.lengthMm,
-    surveyor: survey.surveyor
+    surveyor: survey.surveyor,
+    kind: editingKind.value,
+    occludeReason: survey.occludeReason ?? ''
   })
   dialogVisible.value = true
 }
@@ -147,18 +183,30 @@ async function submit(): Promise<void> {
   if (!instance) return
   const valid = await instance.validate().catch(() => false)
   if (!valid) return
-  if (editingId) {
-    await surveyStore.updateSurvey(editingId, { ...form })
-    ElMessage.success('测次已更新，变化量与速率已重新计算')
-  } else {
-    await surveyStore.createSurvey({ ...form })
-    ElMessage.success('测次已追加，变化量已自动比对')
+  try {
+    if (editingId) {
+      await surveyStore.updateSurvey(editingId, { ...form })
+      ElMessage.success('测次已更新，变化量与速率已重新计算')
+    } else if (form.kind === 'occluded') {
+      await surveyStore.createSurvey({ ...form })
+      ElMessage.success('已登记「暂不可见」，遮挡期保留最后一次可见速率与预警')
+    } else {
+      const isResume = openOcclusion.value !== null
+      await surveyStore.createSurvey({ ...form })
+      ElMessage.success(
+        isResume ? '恢复测次已登记，与最后可见读数比对并按实际间隔天数折算速率' : '测次已追加，变化量已自动比对'
+      )
+    }
+    dialogVisible.value = false
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '保存失败')
   }
-  dialogVisible.value = false
 }
 
 async function removeSurvey(surveyId: string, seq: number): Promise<void> {
-  const confirmed = await ElMessageBox.confirm(`确认删除第 ${seq} 测次？后续测次序号会自动前移。`, '删除确认', {
+  const survey = trend.surveys.value.find((item) => item.id === surveyId)
+  const target = survey && isOccluded(survey) ? `第 ${seq} 测次（暂不可见登记）` : `第 ${seq} 测次`
+  const confirmed = await ElMessageBox.confirm(`确认删除${target}？后续测次序号会自动前移。`, '删除确认', {
     type: 'warning',
     confirmButtonText: '确认删除',
     cancelButtonText: '取消'
@@ -171,6 +219,11 @@ async function removeSurvey(surveyId: string, seq: number): Promise<void> {
 function selectCrack(crackId: string): void {
   surveyStore.setActiveCrack(crackId)
 }
+
+/** 测次明细行样式：遮挡行置灰 */
+function surveyRowClass({ row }: { row: { kind?: string } }): string {
+  return row.kind === 'occluded' ? 'is-occluded-row' : ''
+}
 </script>
 
 <template>
@@ -179,7 +232,7 @@ function selectCrack(crackId: string): void {
       <div>
         <h2 class="page-head__title">复测测次与变化量对比</h2>
         <p class="page-head__desc">
-          选定裂缝后按测次追加读数，系统自动与上一测次比对生成变化量并换算月均速率。
+          选定裂缝后按测次追加读数，系统自动与上一可见测次比对生成变化量并换算月均速率；被防火板等遮挡时可登记「暂不可见」。
         </p>
       </div>
       <div class="page-head__actions">
@@ -225,6 +278,7 @@ function selectCrack(crackId: string): void {
         >
           <div class="section-card__head">
             <span class="section-card__title">{{ item.crack.code }}</span>
+            <el-tag v-if="summaryOf(item.crack.id)?.occluded" size="small" type="warning" effect="dark">遮挡中</el-tag>
             <LevelTag :level="item.level" size="small" />
           </div>
           <div class="section-card__meta">
@@ -250,9 +304,18 @@ function selectCrack(crackId: string): void {
               <span class="muted">
                 累计变化 {{ trend.delta.value.toFixed(2) }} mm · 月均 {{ trend.rate.value.toFixed(3) }} mm/月
               </span>
+              <el-tag v-if="trend.occluded.value" size="small" type="warning" effect="dark">遮挡中</el-tag>
               <LevelTag :level="trend.level.value" :rate="trend.rate.value" />
             </div>
           </div>
+
+          <el-alert
+            v-if="openOcclusion"
+            type="warning"
+            :closable="false"
+            style="margin-bottom: 10px"
+            :title="`第 ${openOcclusion.occlusion.seq} 测次起暂不可见（${openOcclusion.occlusion.date}，${openOcclusion.occlusion.occludeReason ?? '遮挡'}）。遮挡期保留最后一次可见速率与预警，不新增整治建议；恢复后与最后可见读数比对、按实际间隔天数折算速率。`"
+          />
 
           <div v-if="!chart" class="empty-panel is-compact">
             <p class="empty-panel__desc">该裂缝还没有复测记录，点击「追加测次」录入第一条读数。</p>
@@ -278,9 +341,41 @@ function selectCrack(crackId: string): void {
               />
               <text :x="8" :y="chart.top + 4" fill="#5b6b82" font-size="12">{{ chart.max.toFixed(2) }}</text>
               <text :x="8" :y="chart.baseline" fill="#5b6b82" font-size="12">{{ chart.min.toFixed(2) }}</text>
-              <polyline :points="chart.polyline" fill="none" stroke="#2b5c94" stroke-width="2.5" stroke-linejoin="round" />
+              <!-- 遮挡跳过区间：阴影带 + 标注 -->
+              <g v-for="(gap, index) in chart.gaps" :key="`gap-${index}`">
+                <rect
+                  :x="gap.x1"
+                  :y="chart.top"
+                  :width="gap.x2 - gap.x1"
+                  :height="chart.baseline - chart.top"
+                  fill="rgba(230, 162, 60, 0.14)"
+                />
+                <text :x="gap.midX" :y="chart.top + 12" fill="#b57508" font-size="10" text-anchor="middle">
+                  遮挡跳过 {{ gap.days }} 天
+                </text>
+              </g>
+              <!-- 折线分段：跨遮挡区间用虚线 -->
+              <g v-for="(segment, index) in chart.segments" :key="`seg-${index}`">
+                <line
+                  :x1="segment.from.x"
+                  :y1="segment.from.y"
+                  :x2="segment.to.x"
+                  :y2="segment.to.y"
+                  :stroke="segment.skipped ? '#d68910' : '#2b5c94'"
+                  stroke-width="2.5"
+                  :stroke-dasharray="segment.skipped ? '6 4' : undefined"
+                  stroke-linecap="round"
+                />
+              </g>
               <g v-for="point in chart.coords" :key="point.seq">
-                <circle :cx="point.x" :cy="point.y" r="4.5" fill="#fff" stroke="#13335c" stroke-width="2.5" />
+                <circle
+                  :cx="point.x"
+                  :cy="point.y"
+                  r="4.5"
+                  fill="#fff"
+                  :stroke="point.resumed ? '#d68910' : '#13335c'"
+                  stroke-width="2.5"
+                />
                 <text :x="point.x" :y="point.y - 12" fill="#16233a" font-size="12" text-anchor="middle">
                   {{ point.widthMm.toFixed(2) }}
                 </text>
@@ -290,29 +385,49 @@ function selectCrack(crackId: string): void {
                 <text :x="point.x" :y="chart.baseline + 36" fill="#8c99ab" font-size="10" text-anchor="middle">
                   {{ point.date.slice(5) }}
                 </text>
+                <text v-if="point.resumed" :x="point.x" :y="point.y + 16" fill="#b57508" font-size="10" text-anchor="middle">
+                  恢复
+                </text>
               </g>
             </svg>
           </div>
 
           <h4 class="panel-subtitle">测次明细</h4>
-          <el-table :data="trend.surveys.value" border stripe size="small">
-            <el-table-column prop="seq" label="测次" width="70" />
-            <el-table-column prop="date" label="复测日期" width="120" />
-            <el-table-column label="宽度(mm)" width="110">
-              <template #default="{ row }">{{ row.widthMm.toFixed(2) }}</template>
-            </el-table-column>
-            <el-table-column label="长度(mm)" width="100">
-              <template #default="{ row }">{{ row.lengthMm }}</template>
-            </el-table-column>
-            <el-table-column label="变化量(mm)" width="120">
+          <el-table :data="trend.surveys.value" border stripe size="small" :row-class-name="surveyRowClass">
+            <el-table-column prop="seq" label="测次" width="64" />
+            <el-table-column label="复测日期" width="128">
               <template #default="{ row }">
-                <span :style="{ color: row.deltaWidthMm > 0 ? '#c0392b' : '#5b6b82' }">
+                {{ row.date }}
+                <el-tag v-if="row.recoversOcclusionId" size="small" type="success" effect="plain">恢复</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="类型" width="120">
+              <template #default="{ row }">
+                <el-tag v-if="row.kind === 'occluded'" size="small" type="warning">暂不可见</el-tag>
+                <span v-else class="muted">普通读数</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="宽度(mm)" width="100">
+              <template #default="{ row }">{{ row.kind === 'occluded' ? '—' : row.widthMm.toFixed(2) }}</template>
+            </el-table-column>
+            <el-table-column label="长度(mm)" width="96">
+              <template #default="{ row }">{{ row.kind === 'occluded' ? '—' : row.lengthMm }}</template>
+            </el-table-column>
+            <el-table-column label="变化量(mm)" width="110">
+              <template #default="{ row }">
+                <span v-if="row.kind === 'occluded'" class="muted">—</span>
+                <span v-else :style="{ color: row.deltaWidthMm > 0 ? '#c0392b' : '#5b6b82' }">
                   {{ row.deltaWidthMm > 0 ? '+' : '' }}{{ row.deltaWidthMm.toFixed(2) }}
                 </span>
               </template>
             </el-table-column>
-            <el-table-column prop="surveyor" label="复测人" width="100" />
-            <el-table-column label="操作" width="140">
+            <el-table-column label="复测人 / 遮挡原因" min-width="130">
+              <template #default="{ row }">
+                <span v-if="row.kind === 'occluded'">{{ row.occludeReason }}</span>
+                <span v-else>{{ row.surveyor }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="110">
               <template #default="{ row }">
                 <el-button size="small" text type="primary" @click="openEdit(row.id)">
                   <el-icon><Edit /></el-icon>
@@ -336,23 +451,46 @@ function selectCrack(crackId: string): void {
 
     <el-dialog v-model="dialogVisible" :title="dialogTitle" width="520px">
       <el-form ref="formRef" :model="form" :rules="rules" label-width="110px">
+        <el-form-item label="登记类型" prop="kind">
+          <el-radio-group v-model="form.kind" :disabled="editingId !== null">
+            <el-radio-button value="normal">普通读数</el-radio-button>
+            <el-radio-button value="occluded">暂不可见</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
         <el-form-item label="复测日期" prop="date">
           <el-date-picker v-model="form.date" type="date" value-format="YYYY-MM-DD" style="width: 100%" />
         </el-form-item>
-        <el-form-item label="复测宽度(mm)" prop="widthMm">
-          <el-input-number v-model="form.widthMm" :min="0" :step="0.01" :precision="2" style="width: 100%" />
-        </el-form-item>
-        <el-form-item label="复测长度(mm)" prop="lengthMm">
-          <el-input-number v-model="form.lengthMm" :min="0" :step="10" style="width: 100%" />
+        <template v-if="!isOccludedForm">
+          <el-form-item label="复测宽度(mm)" prop="widthMm">
+            <el-input-number v-model="form.widthMm" :min="0" :step="0.01" :precision="2" style="width: 100%" />
+          </el-form-item>
+          <el-form-item label="复测长度(mm)" prop="lengthMm">
+            <el-input-number v-model="form.lengthMm" :min="0" :step="10" style="width: 100%" />
+          </el-form-item>
+        </template>
+        <el-form-item v-else label="遮挡原因" prop="occludeReason">
+          <el-input v-model="form.occludeReason" placeholder="如：夜间检修后防火板遮挡" />
         </el-form-item>
         <el-form-item label="复测人" prop="surveyor">
           <el-input v-model="form.surveyor" placeholder="如 周维" />
         </el-form-item>
         <el-alert
-          v-if="trend.latest.value"
+          v-if="!isOccludedForm && openOcclusion && trend.latest.value"
+          type="warning"
+          :closable="false"
+          :title="`当前处于遮挡期（${openOcclusion.occlusion.date} 起，${openOcclusion.occlusion.occludeReason ?? '遮挡'}）。本次保存将作为恢复测次：与最后可见读数 ${trend.latest.value.widthMm.toFixed(2)} mm（${trend.latest.value.date}）比对，按实际间隔天数折算速率。`"
+        />
+        <el-alert
+          v-else-if="!isOccludedForm && trend.latest.value"
           type="info"
           :closable="false"
-          :title="`上一测次宽度 ${trend.latest.value.widthMm.toFixed(2)} mm（${trend.latest.value.date}），保存后自动换算变化量与月均速率。`"
+          :title="`上一可见测次宽度 ${trend.latest.value.widthMm.toFixed(2)} mm（${trend.latest.value.date}），保存后自动换算变化量与月均速率。`"
+        />
+        <el-alert
+          v-if="isOccludedForm"
+          type="warning"
+          :closable="false"
+          title="登记「暂不可见」不产生读数：遮挡期保留最后一次可见速率与预警等级，不新增整治建议。"
         />
       </el-form>
       <template #footer>
@@ -386,5 +524,10 @@ function selectCrack(crackId: string): void {
 
 svg text {
   font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+:deep(.is-occluded-row) {
+  background-color: #fdf6ec;
+  color: #8c99ab;
 }
 </style>
